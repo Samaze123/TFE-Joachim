@@ -12,20 +12,33 @@ from psychopy import visual, core, event
 
 # ---------- Configuration ----------
 FOLDER_NAME = "Pictures"
+SETS_ROOT = "Sets"
 N_TRIALS = 15
-TOTAL_DURATION = 4.0
+TOTAL_DURATION = 40.0
+
 RED_INTERVAL = 5.0
 ASSUMED_FPS = 60.0
+RED_PROB_PER_FRAME = 1.0 / (RED_INTERVAL * ASSUMED_FPS)
+MIN_BLUE_DURATION = 1.0
+
 CROSS_SIZE = 20
 CROSS_LINE_WIDTH = 3
-IMAGE_EXTENSIONS = ("*.png", "*.jpg", "*.jpeg", "*.bmp", "*.gif", "*.tif", "*.tiff")
+
+IMAGE_EXTENSIONS = ("*.png", "*.jpg", "*.jpeg")
+
+COUNTDOWN_START = 3
+COUNTDOWN_STEP = 1.0 
 
 RED_PROB_PER_FRAME = 1.0 / (RED_INTERVAL * ASSUMED_FPS)
 
+DISPLAY_SIZE = (200, 200)
+MEAN_IMAGE_NAME = "mean_selected_stimuli.png"
+MEAN_EVERY_N = 4
+
 RATE_OPTIONS = {
-    "1 image / s": 1.0,
-    "3 images / s": 3.0,
-    "5.88 images / s": 5.88,
+    "1 image / s":     (1.0,  "rate_1"),
+    # "3 images / s":    (3.0,  "rate_3"),
+    # "5.88 images / s": (5.88, "rate_5_88"),
 }
 
 # ---------- Likert configuration ----------
@@ -36,26 +49,71 @@ LIKERT_OPTIONS = {
     "3": "3. Visage mais avec détails manquants",
     "4": "4. Visage clair",
 }
-LIKERT_KEYS = list(LIKERT_OPTIONS.keys())  # ["1", "2", "3", "4"]
+LIKERT_KEYS = ["1", "2", "3", "4"]
+NUMPAD_KEYS = ["num_1", "num_2", "num_3", "num_4"]
+
+# Map numpad names back to canonical digits so callers get a clean '1'..'4'.
+KEY_NORMALIZE = {f"num_{d}": d for d in "1234"}
 
 # ---------- Locate images (once) ----------
-pictures_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), FOLDER_NAME)
+base_dir = os.path.dirname(os.path.abspath(__file__))
+sets_root = os.path.join(base_dir, SETS_ROOT)
+if not os.path.isdir(sets_root):
+    raise FileNotFoundError(f"Sets root not found: {sets_root}")
 
-if not os.path.isdir(pictures_dir):
-    raise FileNotFoundError(f"Folder not found: {pictures_dir}")
 
-image_files = []
-for ext in IMAGE_EXTENSIONS:
-    image_files.extend(glob.glob(os.path.join(pictures_dir, ext)))
-    image_files.extend(glob.glob(os.path.join(pictures_dir, ext.upper())))
-image_files = sorted(set(image_files))
+def load_set(folder_name):
+    """Load one set folder → (regular_images, mean_image_path).
+    Raises if the folder or required images are missing."""
+    set_dir = os.path.join(sets_root, folder_name)
+    if not os.path.isdir(set_dir):
+        raise FileNotFoundError(f"Set folder not found: {set_dir}")
 
-if not image_files:
-    raise RuntimeError(f"No images found in {pictures_dir}")
+    found = []
+    for ext in IMAGE_EXTENSIONS:
+        found.extend(glob.glob(os.path.join(set_dir, ext)))
+        found.extend(glob.glob(os.path.join(set_dir, ext.upper())))
+    found = sorted(set(found))
+
+    mean_path = None
+    regulars = []
+    for f in found:
+        if os.path.basename(f).lower() == MEAN_IMAGE_NAME.lower():
+            mean_path = f
+        else:
+            regulars.append(f)
+
+    if not regulars:
+        raise RuntimeError(f"No regular images in set '{folder_name}' ({set_dir})")
+    if mean_path is None:
+        raise RuntimeError(
+            f"Required '{MEAN_IMAGE_NAME}' missing in set '{folder_name}' ({set_dir})"
+        )
+    return regulars, mean_path
+
+
+# ---------- Pre-load every set once ----------
+set_cache = {}   # folder_name -> (regulars, mean_path)
+for _, (_, _folder) in RATE_OPTIONS.items():
+    set_cache[_folder] = load_set(_folder)
+    print(f"Loaded set '{_folder}': {len(set_cache[_folder][0])} regular images")
+
+def build_display_sequence(regulars, mean_path, every_n):
+    """Yield an endless sequence: `every_n` shuffled regular images, then
+    the mean image, repeating. Regular images are reshuffled each full pass."""
+    playlist = list(regulars)
+    count = 0
+    while True:
+        random.shuffle(playlist)
+        for img in playlist:
+            yield img
+            count += 1
+            if count % every_n == 0:
+                yield mean_path
 
 # ---------- Set up window (once, reused across trials) ----------
 win = visual.Window(fullscr=True, color="black", units="pix")
-stim = visual.ImageStim(win, image=None)
+stim = visual.ImageStim(win, image=None, size=DISPLAY_SIZE, units="pix")
 
 fixation = visual.ShapeStim(
     win,
@@ -102,19 +160,46 @@ def collect_likert_rating():
     likert_body.draw()
     win.flip()
 
+    accepted = LIKERT_KEYS + NUMPAD_KEYS
+
     while True:
-        keys = event.getKeys(keyList=LIKERT_KEYS + ["escape"])
+        keys = event.waitKeys(keyList=accepted + ["escape"])
         if "escape" in keys:
             raise KeyboardInterrupt
         for k in keys:
-            if k in LIKERT_KEYS:
-                return k
-        core.wait(0.005)  # avoid busy-spinning the CPU
+            if k in accepted:   
+                return KEY_NORMALIZE.get(k, k)
+            
+# ----------Countdown -----------------
+countdown_text = visual.TextStim(
+    win,
+    text="",
+    color="white",
+    height=120,
+    pos=(0, 0),
+    units="pix",
+)
+
+def run_countdown(start=COUNTDOWN_START, step=COUNTDOWN_STEP):
+    """Display a centred numeric countdown before a trial.
+    Honors ESC (raises KeyboardInterrupt)."""
+    clock = core.Clock()
+    event.clearEvents()
+    for n in range(start, 0, -1):
+        countdown_text.text = str(n)
+        clock.reset()
+        while clock.getTime() < step:
+            if "escape" in event.getKeys(keyList=["escape"]):
+                raise KeyboardInterrupt
+            countdown_text.draw()
+            win.flip()
+    win.flip() 
 
 # ---------- Clocks (reused) ----------
 red_clock = core.Clock()
 image_clock = core.Clock()
 session_clock = core.Clock()
+blue_clock = core.Clock()
 
 all_results = []  # one entry per completed trial
 
@@ -122,49 +207,54 @@ try:
     for trial in range(N_TRIALS):
         # ----- Randomize rate for THIS trial -----
         selected_label = random.choice(list(RATE_OPTIONS.keys()))
-        rate = RATE_OPTIONS[selected_label]
+        rate, set_folder = RATE_OPTIONS[selected_label]
         duration = 1.0 / rate  # seconds per image
+
+        # Images for THIS trial come from the rate-specific set.
+        trial_regulars, trial_mean = set_cache[set_folder]
+
+        run_countdown()
 
         # ----- Per-trial state -----
         is_red = False
         fixation.lineColor = "blue"
         rt_data = []
-        playlist = list(image_files)
-
+        blue_clock.reset()
         session_clock.reset()
 
+        display_seq = build_display_sequence(trial_regulars, trial_mean, MEAN_EVERY_N)
+
         # Outer loop: keep cycling through images until 40 s elapse.
-        while session_clock.getTime() < TOTAL_DURATION:
-            random.shuffle(playlist)  # new random order for each full pass
+        for img_path in display_seq:
+            if session_clock.getTime() >= TOTAL_DURATION:
+                break
 
-            for img_path in playlist:
-                if session_clock.getTime() >= TOTAL_DURATION:
-                    break
+            stim.image = img_path
+            image_clock.reset()
 
-                stim.image = img_path
-                image_clock.reset()
+            # Show this image until its slot ends OR the session ends.
+            while (image_clock.getTime() < duration
+                   and session_clock.getTime() < TOTAL_DURATION):
 
-                # Show this image until its slot ends OR the session ends.
-                while (image_clock.getTime() < duration
-                       and session_clock.getTime() < TOTAL_DURATION):
+                if (not is_red and blue_clock.getTime() >= MIN_BLUE_DURATION
+                        and random.random() < RED_PROB_PER_FRAME):
+                    is_red = True
+                    fixation.lineColor = "red"
+                    red_clock.reset()
+                    event.clearEvents()
 
-                    if not is_red and random.random() < RED_PROB_PER_FRAME:
-                        is_red = True
-                        fixation.lineColor = "red"
-                        red_clock.reset()
-                        event.clearEvents()
+                keys = event.getKeys(keyList=["space", "escape"])
+                if "escape" in keys:
+                    raise KeyboardInterrupt
+                if is_red and "space" in keys:
+                    rt_data.append(red_clock.getTime())
+                    is_red = False
+                    fixation.lineColor = "blue"
+                    blue_clock.reset()
 
-                    keys = event.getKeys(keyList=["space", "escape"])
-                    if "escape" in keys:
-                        raise KeyboardInterrupt
-                    if is_red and "space" in keys:
-                        rt_data.append(red_clock.getTime())
-                        is_red = False
-                        fixation.lineColor = "blue"
-
-                    stim.draw()
-                    fixation.draw()
-                    win.flip()
+                stim.draw()
+                fixation.draw()
+                win.flip()
 
         # ----- Ask the Likert scale at the end of the trial -----
         rating_key = collect_likert_rating()
@@ -179,6 +269,7 @@ try:
             "rts": rt_data,
             "likert": int(rating_key),
             "likert_label": rating_label,
+            "set_folder": set_folder,
         })
 
 finally:
@@ -190,9 +281,10 @@ finally:
         mean_rt = round(sum(r["rts"]) / len(r["rts"]), 3) if r["rts"] else None
         print(
             f"Trial {r['trial']:>2}: {r['label']:<16} "
+            f"Set Folder={r['set_folder']}"
             f"({r['duration']:.4f} s/img) | "
             f"session={r['session_time']:.2f}s | "
             f"RTs={rts} | mean={mean_rt} | "
-            f"Likert={r['likert']} ({r['likert_label']})"
+            f"Likert={r['likert']} ({r['likert_label']}) | "
         )
     core.quit()
