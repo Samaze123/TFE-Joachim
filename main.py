@@ -14,12 +14,19 @@ Hardened for cross-platform use (Windows / macOS / Linux):
 import os
 import glob
 import random
-from psychopy import visual, core, event
+from psychopy import visual, core, event, gui
+from datetime import datetime
+try:
+    import pandas as pd
+    _HAVE_PANDAS = True
+except ImportError:
+    _HAVE_PANDAS = False
+    import csv  # fallback
 
 # ---------- Configuration ----------
 SETS_ROOT = "Sets"
 N_TRIALS = 15
-TOTAL_DURATION = 40.0
+TOTAL_DURATION = 4.0
 
 # Mean interval (seconds) between red-cross onsets.
 RED_INTERVAL = 5.0
@@ -142,6 +149,28 @@ def build_display_sequence(regulars, mean_path, every_n):
                 yield mean_path
 
 
+# ---------- Participant info dialog ----------
+def collect_participant_info():
+    """Show a native dialog asking for the participant's name/username.
+
+    Returns a non-empty string. Cancelling the dialog aborts the program
+    cleanly. A blank entry falls back to a timestamped placeholder so the
+    console summary always has an identifier.
+    """
+    dlg = gui.Dlg(title="Participant Information")
+    dlg.addText("Please enter your name or username:")
+    dlg.addField("Name / Username:", "")
+
+    data = dlg.show()
+    if not dlg.OK:  # user pressed Cancel or closed the dialog
+        raise SystemExit("Experiment cancelled at participant-info dialog.")
+
+    # data is a list matching the addField order.
+    name = (data[0] if data else "").strip()
+    if not name:
+        name = "anonymous_" + core.getAbsTime().__str__()
+    return name
+
 # ---------- Set up window (once, reused across trials) ----------
 def create_window():
     """Create the display window with a backend fallback for cross-platform
@@ -158,6 +187,10 @@ def create_window():
             last_err = e
             print(f"Backend '{backend}' failed: {e}")
     raise SystemExit(f"Could not open a window with any backend. Last error: {last_err}")
+
+
+participant_name = collect_participant_info()
+print(f"Participant: {participant_name}")
 
 
 win = create_window()
@@ -234,6 +267,81 @@ likert_body = visual.TextStim(
     alignText="left",
 )
 
+def export_results(results, participant):
+    """Export trial results to an Excel workbook (two sheets).
+    Falls back to CSV if pandas/openpyxl are unavailable."""
+    if not results:
+        print("No completed trials — nothing to export.")
+        return
+
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    safe_name = "".join(c if c.isalnum() or c in "-_" else "_" for c in participant)
+    out_dir = os.path.join(base_dir, "results")
+    os.makedirs(out_dir, exist_ok=True)
+
+    # --- Sheet 1: one row per trial (summary) ---
+    trial_rows = []
+    for r in results:
+        rts = r["rts"]
+        trial_rows.append({
+            "participant": participant,
+            "trial": r["trial"],
+            "rate_label": r["label"],
+            "set_folder": r["set_folder"],
+            "sec_per_image": round(r["duration"], 4),
+            "session_time_s": round(r["session_time"], 3),
+            "n_red_responses": len(rts),
+            "mean_rt_s": round(sum(rts) / len(rts), 3) if rts else None,
+            "min_rt_s": round(min(rts), 3) if rts else None,
+            "max_rt_s": round(max(rts), 3) if rts else None,
+            "rts_all_s": "; ".join(f"{x:.3f}" for x in rts),
+            "likert": r["likert"],
+            "likert_label": r["likert_label"],
+        })
+
+    # --- Sheet 2: one row per RT (long / tidy format) ---
+    rt_rows = []
+    for r in results:
+        if r["rts"]:
+            for i, rt in enumerate(r["rts"], start=1):
+                rt_rows.append({
+                    "participant": participant,
+                    "trial": r["trial"],
+                    "rate_label": r["label"],
+                    "response_index": i,
+                    "rt_s": round(rt, 3),
+                    "likert": r["likert"],
+                })
+        else:
+            rt_rows.append({
+                "participant": participant,
+                "trial": r["trial"],
+                "rate_label": r["label"],
+                "response_index": 0,
+                "rt_s": None,
+                "likert": r["likert"],
+            })
+
+    if _HAVE_PANDAS:
+        path = os.path.join(out_dir, f"results_{safe_name}_{stamp}.xlsx")
+        try:
+            with pd.ExcelWriter(path, engine="openpyxl") as writer:
+                pd.DataFrame(trial_rows).to_excel(writer, sheet_name="per_trial", index=False)
+                pd.DataFrame(rt_rows).to_excel(writer, sheet_name="per_response", index=False)
+            print(f"Results exported to Excel: {path}")
+            return
+        except Exception as e:  # e.g. openpyxl missing
+            print(f"Excel export failed ({e}); falling back to CSV.")
+
+    # CSV fallback (two files)
+    p1 = os.path.join(out_dir, f"results_{safe_name}_{stamp}_per_trial.csv")
+    p2 = os.path.join(out_dir, f"results_{safe_name}_{stamp}_per_response.csv")
+    for path, rows in ((p1, trial_rows), (p2, rt_rows)):
+        with open(path, "w", newline="", encoding="utf-8-sig") as f:
+            writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
+            writer.writeheader()
+            writer.writerows(rows)
+    print(f"Results exported to CSV:\n  {p1}\n  {p2}")
 
 def collect_likert_rating():
     """Display the Likert scale; return '1'..'4'. ESC or close button -> quit."""
@@ -384,6 +492,7 @@ finally:
     win.close()
 
     print("\n===== SUMMARY (completed trials) =====")
+    print(f"Participant: {participant_name}")
     for r in all_results:
         rts = [round(x, 3) for x in r["rts"]]
         mean_rt = round(sum(r["rts"]) / len(r["rts"]), 3) if r["rts"] else None
@@ -395,4 +504,6 @@ finally:
             f"RTs={rts} | mean={mean_rt} | "
             f"Likert={r['likert']} ({r['likert_label']}) |"
         )
+    export_results(all_results, participant_name)
     core.quit()
+
