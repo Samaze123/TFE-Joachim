@@ -192,6 +192,19 @@ RATE_OPTIONS = {
     for label, spec in _cfg["RATE_OPTIONS"].items()
 }
 
+# --- Balanced trial schedule ---
+# N_TRIALS is now interpreted as trials PER RATE. The total number of trials
+# is N_TRIALS * (number of rates). Each rate appears exactly N_TRIALS times,
+# and the overall presentation order is randomized.
+TRIALS_PER_RATE = N_TRIALS
+TRIAL_SCHEDULE = [label for label in RATE_OPTIONS.keys()
+                  for _ in range(TRIALS_PER_RATE)]
+random.shuffle(TRIAL_SCHEDULE)
+TOTAL_TRIALS = len(TRIAL_SCHEDULE)   # == N_TRIALS * len(RATE_OPTIONS)
+
+print(f"Trials per rate: {TRIALS_PER_RATE} | "
+      f"Rates: {len(RATE_OPTIONS)} | Total trials: {TOTAL_TRIALS}")
+
 LIKERT_QUESTION = _cfg["LIKERT_QUESTION"]
 LIKERT_OPTIONS  = _cfg["LIKERT_OPTIONS"]
 
@@ -538,12 +551,10 @@ blue_clock = core.Clock()      # time since cross last became blue
 all_results = []  # one entry per completed trial
 
 try:
-    for trial in range(N_TRIALS):
-        # ----- Randomize rate for THIS trial -----
-        selected_label = random.choice(list(RATE_OPTIONS.keys()))
+    for trial, selected_label in enumerate(TRIAL_SCHEDULE):
+        # ----- Rate for THIS trial (pre-balanced & shuffled schedule) -----
         rate, set_folder = RATE_OPTIONS[selected_label]
         duration = 1.0 / rate  # seconds per image
-
         # Images for THIS trial come from the rate-specific set.
         trial_regulars, trial_mean = set_cache[set_folder]
 
