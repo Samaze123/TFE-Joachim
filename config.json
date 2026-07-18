@@ -1,0 +1,43 @@
+{
+  "SETS_ROOT": "Sets",
+  "N_TRIALS": 15,
+  "TOTAL_DURATION": 40.0,
+  "RED_INTERVAL": 5.0,
+  "MIN_BLUE_DURATION": 1.0,
+  "CROSS_SIZE": 20,
+  "CROSS_LINE_WIDTH": 3,
+  "IMAGE_EXTENSIONS": [
+    "png",
+    "jpg",
+    "jpeg"
+  ],
+  "COUNTDOWN_START": 3,
+  "COUNTDOWN_STEP": 1.0,
+  "DISPLAY_SIZE": [
+    600,
+    600
+  ],
+  "MEAN_IMAGE_NAME": "mean_selected_stimuli.png",
+  "MEAN_EVERY_N": 4,
+  "RATE_OPTIONS": {
+    "1 image / s": {
+      "rate": 1.0,
+      "folder": "rate_1"
+    },
+    "3 images / s": {
+      "rate": 3.0,
+      "folder": "rate_3"
+    },
+    "5.88 images / s": {
+      "rate": 5.88,
+      "folder": "rate_5_88"
+    }
+  },
+  "LIKERT_QUESTION": "Avez-vous vu un visage ?",
+  "LIKERT_OPTIONS": {
+    "1": "1. Aucun visage du tout.",
+    "2": "2. Pas certain",
+    "3": "3. Visage mais avec détails manquants",
+    "4": "4. Visage clair"
+  }
+}

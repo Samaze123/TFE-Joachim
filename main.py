@@ -10,9 +10,9 @@ Hardened for cross-platform use (Windows / macOS / Linux):
 - Case-insensitive-friendly image discovery for case-sensitive filesystems.
 - Graceful window creation with backend fallback.
 """
-
 import os
 import glob
+import json
 import random
 from psychopy import visual, core, event, gui
 from datetime import datetime
@@ -23,47 +23,181 @@ except ImportError:
     _HAVE_PANDAS = False
     import csv  # fallback
 
-# ---------- Configuration ----------
-SETS_ROOT = "Sets"
-N_TRIALS = 15
-TOTAL_DURATION = 4.0
+# ---------- Configuration loading ----------
+CONFIG_FILENAME = "config.json"
 
-# Mean interval (seconds) between red-cross onsets.
-RED_INTERVAL = 5.0
-# Minimum time the cross must remain blue before it is allowed to turn red again.
-MIN_BLUE_DURATION = 1.0
+_REQUIRED_KEYS = (
+    "SETS_ROOT", "N_TRIALS", "TOTAL_DURATION",
+    "RED_INTERVAL", "MIN_BLUE_DURATION",
+    "CROSS_SIZE", "CROSS_LINE_WIDTH",
+    "IMAGE_EXTENSIONS",
+    "COUNTDOWN_START", "COUNTDOWN_STEP",
+    "DISPLAY_SIZE", "MEAN_IMAGE_NAME", "MEAN_EVERY_N",
+    "RATE_OPTIONS",
+    "LIKERT_QUESTION", "LIKERT_OPTIONS",
+)
 
-CROSS_SIZE = 20
-CROSS_LINE_WIDTH = 3
+_DESCRIPTIONS = {
+    "SETS_ROOT":         "Root folder (relative to script) containing image set subfolders.",
+    "N_TRIALS":          "Number of trials in the session (integer).",
+    "TOTAL_DURATION":    "Duration of each trial in seconds.",
+    "RED_INTERVAL":      "Mean seconds between red-cross onsets (Poisson).",
+    "MIN_BLUE_DURATION": "Minimum seconds the cross stays blue before it may turn red.",
+    "CROSS_SIZE":        "Half-length of the fixation cross arms, in pixels.",
+    "CROSS_LINE_WIDTH":  "Line width of the fixation cross, in pixels.",
+    "IMAGE_EXTENSIONS":  "JSON list of file extensions to load, e.g. [\"png\",\"jpg\"].",
+    "COUNTDOWN_START":   "Countdown starting number before each trial.",
+    "COUNTDOWN_STEP":    "Seconds each countdown number is shown.",
+    "DISPLAY_SIZE":      "JSON [width, height] of images in pixels.",
+    "MEAN_IMAGE_NAME":   "Filename of the special 'mean' image.",
+    "MEAN_EVERY_N":      "Insert the mean image after every N regular images.",
+    "RATE_OPTIONS":      "JSON object: label -> {rate, folder}.",
+    "LIKERT_QUESTION":   "Question text shown on the Likert screen.",
+    "LIKERT_OPTIONS":    "JSON object: key -> answer label.",
+}
+# ---------- Settings editor (startup) ----------
+# Keys whose values are lists/dicts are edited as JSON text; scalars as-is.
+_COMPLEX_KEYS = ("IMAGE_EXTENSIONS", "DISPLAY_SIZE", "RATE_OPTIONS", "LIKERT_OPTIONS")
 
-IMAGE_EXTENSIONS = ("png", "jpg", "jpeg")
+def load_config(base_dir):
+    """Load and validate config.json located next to this script."""
+    path = os.path.join(base_dir, CONFIG_FILENAME)
+    if not os.path.isfile(path):
+        raise SystemExit(f"Configuration file not found: {path}")
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            cfg = json.load(f)
+    except json.JSONDecodeError as e:
+        raise SystemExit(f"Invalid JSON in {path}: {e}")
+    return validate_config(cfg, path)
 
-COUNTDOWN_START = 3
-COUNTDOWN_STEP = 1.0
+# ---------- Config validation (reusable) ----------
+def validate_config(cfg, source="config"):
+    """Validate a config dict in-place. Raises SystemExit on failure."""
+    missing = [k for k in _REQUIRED_KEYS if k not in cfg]
+    if missing:
+        raise SystemExit(
+            f"Missing required config key(s) in {source}: {', '.join(missing)}"
+        )
+    if not isinstance(cfg["RATE_OPTIONS"], dict) or not cfg["RATE_OPTIONS"]:
+        raise SystemExit("RATE_OPTIONS must be a non-empty object.")
+    for label, spec in cfg["RATE_OPTIONS"].items():
+        if not isinstance(spec, dict) or "rate" not in spec or "folder" not in spec:
+            raise SystemExit(
+                f"RATE_OPTIONS['{label}'] must contain 'rate' and 'folder'."
+            )
+    return cfg
 
-DISPLAY_SIZE = (600, 600)
-MEAN_IMAGE_NAME = "mean_selected_stimuli.png"
-MEAN_EVERY_N = 4
+
+
+def _coerce_scalar(original, text):
+    """Coerce edited text back to the original value's type."""
+    text = text.strip()
+    if isinstance(original, bool):
+        return text.lower() in ("true", "1", "yes")
+    if isinstance(original, int):
+        return int(text)
+    if isinstance(original, float):
+        return float(text)
+    return text  # str
+
+
+def edit_config_dialog(cfg, base_dir):
+    """Show an editable settings dialog for the whole config.
+
+    Returns a (possibly updated) config dict. On Cancel, returns the original
+    cfg unchanged (experiment proceeds with existing values).
+    Complex values (lists/dicts) are edited as JSON.
+    """
+    dlg = gui.Dlg(title="Experiment Settings")
+    dlg.addText("Review / edit configuration. Complex values are JSON.")
+
+    field_kinds = {}  # key -> "scalar" | "json"
+    for key in _REQUIRED_KEYS:
+        value = cfg[key]
+        desc = _DESCRIPTIONS.get(key, "")
+        # Visible description embedded in the label; full text also as tooltip.
+        label = f"{key}  —  {desc}" if desc else key
+        if key in _COMPLEX_KEYS or isinstance(value, (list, dict)):
+            dlg.addField(label, json.dumps(value, ensure_ascii=False), tip=desc)
+            field_kinds[key] = "json"
+        else:
+            dlg.addField(label, value, tip=desc)
+            field_kinds[key] = "scalar"
+
+    dlg.addField("__save_to_disk__", True, label="Save changes to config.json")
+
+    data = dlg.show()
+    if not dlg.OK:
+        print("Settings dialog cancelled; using existing config.")
+        return cfg
+
+    # data matches addField order: one entry per key, then the save flag.
+    new_cfg = dict(cfg)
+    errors = []
+    for i, key in enumerate(_REQUIRED_KEYS):
+        raw = data[i]
+        try:
+            if field_kinds[key] == "json":
+                new_cfg[key] = json.loads(raw) if isinstance(raw, str) else raw
+            else:
+                new_cfg[key] = _coerce_scalar(cfg[key], str(raw))
+        except (json.JSONDecodeError, ValueError) as e:
+            errors.append(f"{key}: {e}")
+
+    save_flag = bool(data[len(_REQUIRED_KEYS)])
+
+    if errors:
+        raise SystemExit("Invalid settings:\n  " + "\n  ".join(errors))
+
+    # Re-validate structure before accepting.
+    validate_config(new_cfg, "settings dialog")
+
+    if save_flag:
+        path = os.path.join(base_dir, CONFIG_FILENAME)
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(new_cfg, f, indent=2, ensure_ascii=False)
+            print(f"Configuration saved to {path}")
+        except OSError as e:
+            print(f"Warning: could not save config ({e}); using values in-memory.")
+
+    return new_cfg
+
+base_dir = os.path.dirname(os.path.abspath(__file__))
+_cfg = load_config(base_dir)
+_cfg = edit_config_dialog(_cfg, base_dir)
+
+SETS_ROOT          = _cfg["SETS_ROOT"]
+N_TRIALS           = _cfg["N_TRIALS"]
+TOTAL_DURATION     = _cfg["TOTAL_DURATION"]
+
+RED_INTERVAL       = _cfg["RED_INTERVAL"]
+MIN_BLUE_DURATION  = _cfg["MIN_BLUE_DURATION"]
+
+CROSS_SIZE         = _cfg["CROSS_SIZE"]
+CROSS_LINE_WIDTH   = _cfg["CROSS_LINE_WIDTH"]
+
+IMAGE_EXTENSIONS   = tuple(_cfg["IMAGE_EXTENSIONS"])
+
+COUNTDOWN_START    = _cfg["COUNTDOWN_START"]
+COUNTDOWN_STEP     = _cfg["COUNTDOWN_STEP"]
+
+DISPLAY_SIZE       = tuple(_cfg["DISPLAY_SIZE"])
+MEAN_IMAGE_NAME    = _cfg["MEAN_IMAGE_NAME"]
+MEAN_EVERY_N       = _cfg["MEAN_EVERY_N"]
 
 RATE_OPTIONS = {
-    "1 image / s":     (1.0,  "rate_1"),
-    "3 images / s":    (3.0,  "rate_3"),
-    "5.88 images / s": (5.88, "rate_5_88"),
+    label: (spec["rate"], spec["folder"])
+    for label, spec in _cfg["RATE_OPTIONS"].items()
 }
 
-# ---------- Likert configuration ----------
-LIKERT_QUESTION = "Avez-vous vu un visage ?"
-LIKERT_OPTIONS = {
-    "1": "1. Aucun visage du tout.",
-    "2": "2. Pas certain",
-    "3": "3. Visage mais avec détails manquants",
-    "4": "4. Visage clair",
-}
-LIKERT_KEYS = ["1", "2", "3", "4"]
-NUMPAD_KEYS = ["num_1", "num_2", "num_3", "num_4"]
+LIKERT_QUESTION = _cfg["LIKERT_QUESTION"]
+LIKERT_OPTIONS  = _cfg["LIKERT_OPTIONS"]
 
-# Map numpad names back to canonical digits so callers get a clean '1'..'4'.
-KEY_NORMALIZE = {f"num_{d}": d for d in "1234"}
+LIKERT_KEYS   = list(LIKERT_OPTIONS.keys())            # e.g. ["1","2","3","4"]
+NUMPAD_KEYS   = [f"num_{k}" for k in LIKERT_KEYS]
+KEY_NORMALIZE = {f"num_{k}": k for k in LIKERT_KEYS}
 
 
 # ---------- Red-cross scheduler (time-based, monitor-independent) ----------
